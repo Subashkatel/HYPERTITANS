@@ -5,6 +5,10 @@ from torch.nn import Module, ModuleList, Parameter, ParameterList
 
 from einops import rearrange
 
+from hypll.manifolds.poincare_ball import Curvature, PoincareBall
+from hypll.tensors import TangentTensor
+from hypll import nn as hnn
+
 # functions
 
 def l2norm(t):
@@ -246,3 +250,91 @@ class MemoryAttention(Module):
         ff_out = h @ ffw2
 
         return attn_out + ff_out
+
+# hyperbolic memory MLP using Poincare ball model
+
+class HyperbolicMemoryMLP(Module):
+    """
+    Memory MLP operating in hyperbolic (Poincare ball) space.
+
+    Hyperbolic geometry is particularly suited for hierarchical data
+    and can represent tree-like structures more efficiently than
+    Euclidean space. This may benefit memory retrieval patterns
+    that have hierarchical relationships.
+
+    Reference: HypLL library (https://github.com/maxvanspengler/hyperbolic_learning_library)
+    """
+    def __init__(
+        self,
+        dim,
+        depth = 2,
+        expansion_factor = 2.,
+        curvature = 1.0,
+        learn_curvature = False
+    ):
+        super().__init__()
+
+        # Poincare ball manifold
+        self.manifold = PoincareBall(c=Curvature(value=curvature, requires_grad=learn_curvature))
+
+        dim_hidden = int(dim * expansion_factor)
+
+        # Build hyperbolic layers
+        self.layers = ModuleList()
+        dims = [dim] + [dim_hidden] * (depth - 1) + [dim]
+
+        for i, (dim_in, dim_out) in enumerate(zip(dims[:-1], dims[1:])):
+            self.layers.append(hnn.HLinear(
+                in_features=dim_in,
+                out_features=dim_out,
+                manifold=self.manifold
+            ))
+            # Add activation for all but the last layer
+            if i < len(dims) - 2:
+                self.layers.append(hnn.HReLU(manifold=self.manifold))
+
+        self.dim = dim
+
+    def forward(self, x):
+        """
+        Args:
+            x: Euclidean tensor of shape (batch, seq, dim) or (batch, dim)
+        Returns:
+            Euclidean tensor of same shape as input
+        """
+        orig_shape = x.shape
+
+        # Flatten batch dimensions if needed
+        if x.ndim > 2:
+            x = rearrange(x, '... d -> (...) d')
+
+        # Map from Euclidean to hyperbolic space via exponential map
+        # TangentTensor wraps the Euclidean vector as a tangent vector at the origin
+        tangent = TangentTensor(data=x, man_dim=-1, manifold=self.manifold)
+        h = self.manifold.expmap(tangent)
+
+        # Apply hyperbolic layers
+        for layer in self.layers:
+            h = layer(h)
+
+        # Map back to Euclidean space via logarithmic map
+        # logmap(x, y) maps from base point x to point y
+        # Create origin on manifold by mapping zero tangent vector
+        # Use multiplication by 0 to keep in computational graph
+        zero_data = h.tensor * 0.0
+        zero_tangent = TangentTensor(
+            data=zero_data,
+            man_dim=-1,
+            manifold=self.manifold
+        )
+        origin = self.manifold.expmap(zero_tangent)
+        out_tangent = self.manifold.logmap(origin, h)
+
+        # Extract tensor with gradient tracking (use .tensor not .data)
+        out = out_tangent.tensor
+
+        # Restore original shape
+        if len(orig_shape) > 2:
+            out = out.view(*orig_shape)
+
+        return out

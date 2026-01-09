@@ -1,6 +1,19 @@
 train_local.py
 .DS_Store
 
+# Debug scripts (temporary)
+debug_*.py
+
+# Conda environments
+titans_env/
+titans_test_env/
+
+# Training outputs
+*.pkl
+model_comparison.png
+prediction_errors.png
+training_results.pkl
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
